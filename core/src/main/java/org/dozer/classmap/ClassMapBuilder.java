@@ -15,9 +15,18 @@
  */
 package org.dozer.classmap;
 
+import java.beans.PropertyDescriptor;
+import java.lang.reflect.AccessibleObject;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map.Entry;
+import java.util.Set;
+
 import org.apache.commons.lang3.StringUtils;
+import org.dozer.Converter;
 import org.dozer.Mapping;
-import org.dozer.MappingException;
 import org.dozer.classmap.generator.BeanMappingGenerator;
 import org.dozer.classmap.generator.GeneratorUtils;
 import org.dozer.fieldmap.DozerField;
@@ -27,15 +36,6 @@ import org.dozer.fieldmap.MapFieldMap;
 import org.dozer.util.DozerConstants;
 import org.dozer.util.MappingUtils;
 import org.dozer.util.ReflectionUtils;
-
-import java.beans.PropertyDescriptor;
-import java.lang.reflect.Field;
-import java.lang.reflect.Member;
-import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map.Entry;
-import java.util.Set;
 
 /**
  * Internal class for adding implicit field mappings to a ClassMap. Also, builds implicit ClassMap for class mappings
@@ -221,96 +221,96 @@ public final class ClassMapBuilder {
     }
   }
 
-  public static class AnnotationPropertiesGenerator implements ClassMappingGenerator {
+	public static abstract class AnnotationGenerator implements ClassMappingGenerator {
 
-    public boolean accepts(ClassMap classMap) {
-      return true;
-    }
+		enum PropertyType {
+			SRC, DEST
+		}
+		
+		public boolean accepts(ClassMap classMap) {
+			return true;
+		}
+		
+		public boolean apply(ClassMap classMap, Configuration configuration) {
+			Class<?> srcType = classMap.getSrcClassToMap();
+			addMappingForProperties(classMap, configuration, srcType, PropertyType.SRC);
+			Class<?> destType = classMap.getDestClassToMap();
+			addMappingForProperties(classMap, configuration, destType, PropertyType.DEST);
+			return false;
+		}
+		
+		protected abstract void addMappingForProperties(ClassMap classMap, Configuration configuration, Class<?> type, PropertyType propertyType);
+		
+		protected void addMapping(ClassMap classMap, Configuration configuration, String srcName, String destName,
+				AccessibleObject accessibleObject) {
+			FieldMap fieldMap = new GenericFieldMap(classMap);
 
-    public boolean apply(ClassMap classMap, Configuration configuration) {
-      Class<?> srcType = classMap.getSrcClassToMap();
-      PropertyDescriptor[] srcProperties = ReflectionUtils.getPropertyDescriptors(srcType);
-      for (PropertyDescriptor property : srcProperties) {
-        Method readMethod = property.getReadMethod();
-        if (readMethod != null) {
-          Mapping mapping = readMethod.getAnnotation(Mapping.class);
-          String propertyName = property.getName();
-          if (mapping != null) {
-            String pairName = mapping.value().trim();
-            GeneratorUtils.addGenericMapping(classMap, configuration, propertyName, pairName.isEmpty() ? propertyName : pairName);
-          }
-        }
-      }
+			fieldMap.setSrcField(createDozerField(srcName));
+			fieldMap.setDestField(createDozerField(destName));
 
-      Class<?> destType = classMap.getDestClassToMap();
-      PropertyDescriptor[] destProperties = ReflectionUtils.getPropertyDescriptors(destType);
-      for (PropertyDescriptor property : destProperties) {
-        Method readMethod = property.getReadMethod();
-        if (readMethod != null) {
-          Mapping mapping = readMethod.getAnnotation(Mapping.class);
-          String propertyName = property.getName();
-          if (mapping != null) {
-            String pairName = mapping.value().trim();
-            GeneratorUtils.addGenericMapping(classMap, configuration, pairName.isEmpty() ? propertyName : pairName, propertyName);
-          }
-        }
-      }
+			// add CopyByReferences per defect #1728159
+			MappingUtils.applyGlobalCopyByReference(configuration, fieldMap, classMap);
+			addCustomConverter(fieldMap, accessibleObject);
+			classMap.addFieldMapping(fieldMap);
+		}
+		
+		private DozerField createDozerField(String popertyName) {
+			DozerField field = new DozerField(popertyName, null);
+			field.setAccessible(true);
+			return field;
+		}
 
-      return false;
-    }
-  }
+		protected void addCustomConverter(FieldMap fieldMap, AccessibleObject accessibleObject) {
 
-  public static class AnnotationFieldsGenerator implements ClassMappingGenerator {
+			// TODO : add support for parameter
+			if (accessibleObject.isAnnotationPresent(Converter.class)) {
+				Converter converter = accessibleObject.getAnnotation(Converter.class);
+				fieldMap.setCustomConverter(converter.value().getCanonicalName());
+			}
+		}
+	}
 
-    public boolean accepts(ClassMap classMap) {
-      return true;
-    }
+	public static class AnnotationPropertiesGenerator extends AnnotationGenerator {
 
-    public boolean apply(ClassMap classMap, Configuration configuration) {
-      Class<?> srcType = classMap.getSrcClassToMap();
-      do {
-        for (Field field : srcType.getDeclaredFields()) {
-          Mapping mapping = field.getAnnotation(Mapping.class);
-          String fieldName = field.getName();
-          if (mapping != null) {
-            String pairName = mapping.value().trim();
-            addFieldMapping(classMap, configuration, fieldName, pairName.isEmpty() ? fieldName : pairName);
-          }
-        }
-        srcType = srcType.getSuperclass();
-      } while (srcType != null);
-      
-      Class<?> destType = classMap.getDestClassToMap();
-      do {
-        for (Field field : destType.getDeclaredFields()) {
-          Mapping mapping = field.getAnnotation(Mapping.class);
-          String fieldName = field.getName();
-          if (mapping != null) {
-            String pairName = mapping.value().trim();
-            addFieldMapping(classMap, configuration, pairName.isEmpty() ? fieldName : pairName, fieldName);
-          }
-        }
-        destType = destType.getSuperclass();
-      } while (destType != null);
-      
-      return false;
-    }
-  }
+		protected void addMappingForProperties(ClassMap classMap, Configuration configuration, Class<?> type, PropertyType propertyType) {
+			PropertyDescriptor[] properties = ReflectionUtils.getPropertyDescriptors(type);
+			for (PropertyDescriptor property : properties) {
+				Method readMethod = property.getReadMethod();
+				if (readMethod != null) {
+					Mapping mapping = readMethod.getAnnotation(Mapping.class);
+					String propertyName = property.getName();
+					if (mapping != null) {
+						String pairName = mapping.value().trim();
+						if (propertyType == PropertyType.SRC)
+							addMapping(classMap, configuration, propertyName, pairName.isEmpty() ? propertyName : pairName, readMethod);
+						else if(propertyType == PropertyType.DEST)
+							addMapping(classMap, configuration, pairName.isEmpty() ? propertyName : pairName, propertyName, readMethod);
+					}
+				}
+			}
+		}
 
-  private static void addFieldMapping(ClassMap classMap, Configuration configuration, String srcName, String destName) {
-    FieldMap fieldMap = new GenericFieldMap(classMap);
+	}
 
-    DozerField sourceField = new DozerField(srcName, null);
-    DozerField destField = new DozerField(destName, null);
+	public static class AnnotationFieldsGenerator extends AnnotationGenerator {
 
-    sourceField.setAccessible(true);
-    destField.setAccessible(true);
+		protected void addMappingForProperties(ClassMap classMap, Configuration configuration, Class<?> srcType, PropertyType propertyType) {
+			do {
+				for (Field field : srcType.getDeclaredFields()) {
+					Mapping mapping = field.getAnnotation(Mapping.class);
+					String fieldName = field.getName();
+					if (mapping != null) {
+						String pairName = mapping.value().trim();
+						if (propertyType == PropertyType.SRC)
+							addMapping(classMap, configuration, fieldName, pairName.isEmpty() ? fieldName : pairName, field);
+						else if(propertyType == PropertyType.DEST)
+							addMapping(classMap, configuration, pairName.isEmpty() ? fieldName : pairName, fieldName, field);
+					}
+				}
+				srcType = srcType.getSuperclass();
+			} while (srcType != null);
+		
+		}
+	}
 
-    fieldMap.setSrcField(sourceField);
-    fieldMap.setDestField(destField);
-
-    // add CopyByReferences per defect #1728159
-    MappingUtils.applyGlobalCopyByReference(configuration, fieldMap, classMap);
-    classMap.addFieldMapping(fieldMap);
-  }
 }
